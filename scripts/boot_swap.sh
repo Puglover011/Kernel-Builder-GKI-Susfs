@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# scripts/boot_swap.sh
 set -euo pipefail
 
 # Default variables

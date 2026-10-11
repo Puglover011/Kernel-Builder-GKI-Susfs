@@ -5,21 +5,21 @@ echo ">>> Executing Integration Module for standard KernelSU..."
 
 if [ "${USE_DYNAMIC_TRANSPLANT}" == "true" ]; then
     echo ">>> 1. Cloning pristine official KernelSU upstream..."
-    git clone https://github.com/tiann/KernelSU.git "${MANAGER_DIR}"
+    git clone "https://github.com/${UPSTREAM_REPO}.git" "${MANAGER_DIR}"
     
     ln -sfn "../${MANAGER_DIR}" "common/${MANAGER_DIR}"
     cd common
-    bash "${MANAGER_DIR}/kernel/setup.sh" main
+    bash "${MANAGER_DIR}/kernel/setup.sh" "${TARGET_BRANCH}"
     cd ..
     
     cd "${MANAGER_DIR}"
-    UPSTREAM_HASH=$(git log -n 1 --format="%H" -- . ":!website/" ":!docs/" ":!*.md" ":!.github/")
+    UPSTREAM_HASH=$(git log -n 1 --format="%H" -i --grep="ci skip" --grep="skip ci" --grep="clippy" --invert-grep -- manager/ kernel/ userspace/ .github/workflows/ ":!*Cargo.lock" ":!*Cargo.toml")
     CALCULATED_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
     CALCULATED_COUNT=$(git rev-list --count "${UPSTREAM_HASH}")
     UPSTREAM_BRANCH="main"
 
-    echo ">>> 2. Fetching Simonpunk's 6.6-dev 10_enable_susfs_for_ksu patch..."
-    PATCH_URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android15-6.6-dev/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+    echo ">>> 2. Fetching Simonpunk's dynamic 10_enable_susfs_for_ksu patch..."
+    PATCH_URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/${SUSFS_BRANCH}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
 
     if wget -qO 10_enable_susfs_for_ksu.patch "$PATCH_URL"; then
         echo ">>> 3. Applying SuSFS patch dynamically..."
@@ -40,6 +40,13 @@ ccflags-y += -DCONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=1
 ccflags-y += -DCONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=1
 ccflags-y += -DCONFIG_KSU_SUSFS_OPEN_REDIRECT=1
 ccflags-y += -DCONFIG_KSU_SUSFS_SUS_MAP=1
+# --- Print SuSFS Version ---
+ifeq ($(strip $(CONFIG_KSU_SUSFS)),y)
+ifeq ($(shell test -e $(srctree)/fs/susfs.c; echo $$?),0)
+$(eval SUSFS_VERSION=$(shell cat $(srctree)/include/linux/susfs.h | grep -E '^#define SUSFS_VERSION' | cut -d' ' -f3 | sed 's/"//g'))
+$(info -- SuSFS version: $(SUSFS_VERSION))
+endif
+endif
 EOF
         rm 10_enable_susfs_for_ksu.patch
     else
@@ -70,11 +77,11 @@ else
     git fetch --quiet "${OFFICIAL_REPO_URL}" main
     RAW_BASE=$(git merge-base HEAD FETCH_HEAD)
     
-    # FIX 4: Calculate Hash, Count, and Tag starting strictly from the pristine base commit
+    # FIX 4: Walk backward down the pristine mainline branch
     set +o pipefail
-    UPSTREAM_HASH=$(git log --first-parent "${RAW_BASE}" --format="%H" -n 1 -- . ":!website/" ":!docs/" ":!*.md" ":!.github/")
+    UPSTREAM_HASH=$(git log -n 1 --first-parent "${RAW_BASE}" --format="%H" -i --grep="ci skip" --grep="skip ci" --grep="clippy" --invert-grep -- manager/ kernel/ userspace/ .github/workflows/ ":!*Cargo.lock" ":!*Cargo.toml")
     set -o pipefail
-    
+
     CALCULATED_COUNT=$(git rev-list --count "${UPSTREAM_HASH}" 2>/dev/null || echo "11950")
     CALCULATED_TAG=$(git describe --tags --abbrev=0 "${UPSTREAM_HASH}" 2>/dev/null || echo "v0.0.0")
     

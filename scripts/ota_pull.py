@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+# scripts/ota_pull.py
 import argparse
 import os
 import re

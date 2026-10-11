@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# scripts/integrate_susfs.sh
 set -euo pipefail
 
 cd kernel_workspace

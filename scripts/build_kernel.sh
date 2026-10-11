@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
+# scripts/build_kernel.sh
 set -euo pipefail
 
-WITH_CUSTOM=${WITH_CUSTOM:-false}
+ENABLE_NOMOUNT=${ENABLE_NOMOUNT:-false}
+ENABLE_NET_OPTS=${ENABLE_NET_OPTS:-false}
+BASE_VER=${BASE_VER:-}
 
 echo "=== Initializing Execution Engine ==="
 
@@ -13,11 +16,21 @@ echo ">>> Marking repo as clean (sanitizes all custom configuration & source mod
 git -C common ls-files -m | xargs -r git -C common update-index --assume-unchanged
 
 # Build method 
-if [ -f "tools/bazel" ]; then
-    echo ">>> Modern Kleaf/Bazel ecosystem detected..."
+if [ "$BASE_VER" != "5.10" ] && [ -f "tools/bazel" ]; then
+    echo ">>> Modern Kleaf/Bazel ecosystem detected for $BASE_VER..."
     
-    # Enforce standard sandboxing and inject MAKEFLAGS dynamically
+    # 5.15 Kleaf doesn't support the --notrim wrapper flag. 
+    # (configure_kconfigs.sh handles it physically via the dictionary injection)
+    TRIM_FLAGS=""
+    if [ "$BASE_VER" = "5.15" ]; then
+        echo "  -> 5.15 detected. Relying on physical Bazel dictionary patch (omitting --notrim)..."
+    else
+        TRIM_FLAGS="--notrim"
+    fi
+    
+    # Enforce standard sandboxing, disable trimming dynamically, and inject MAKEFLAGS
     tools/bazel run --config=stamp \
+      $TRIM_FLAGS \
       --action_env=SOURCE_DATE_EPOCH="$OFFICIAL_DATE" \
       --action_env=STABLE_BUILD_VERSION="-g$OFFICIAL_HASH" \
       --action_env=KLEAF_KERNEL_BUILD_VERSION="-g$OFFICIAL_HASH" \
@@ -27,33 +40,25 @@ if [ -f "tools/bazel" ]; then
       -- \
       --destdir=out/dist
 else
-
-    echo ">>> Legacy Hermetic Make ecosystem detected (5.10 or older)..."
+    echo ">>> Legacy Hermetic Make ecosystem detected (5.10 or fallback)..."
     
     mkdir -p out/dist
+    export DIST_DIR="out/dist"
     
-    # 1. Export standard environment variables for legacy build.sh
+    # Export standard environment variables for legacy build.sh
     export KERNEL_DIR="common"
     export BUILD_CONFIG="common/build.config.gki.aarch64"
     export SOURCE_DATE_EPOCH="$OFFICIAL_DATE"
     
-    # Inject the fragment
-    export EXTRA_DEFCONFIG_FRAGMENTS="custom_legacy.fragment"
-
-    export DIST_DIR="out/dist"
-    
     # Inject official hash and Make overrides
     export EXTRA_LINUX_VERSION="-g${OFFICIAL_HASH}"
     
-    # 2. Run the legacy orchestration script
+    # Run the legacy orchestration script
     if [ -f "build/build.sh" ]; then
         echo "[+] Invoking build/build.sh..."
         bash build/build.sh
-    elif [ -f "build.sh" ]; then
-        echo "[+] Invoking build.sh..."
-        bash build.sh
     else
-        echo "[-] ERROR: Legacy build.sh orchestrator not found!" >&2
+        echo "[-] ERROR: Legacy build/build.sh orchestrator not found!" >&2
         exit 1
     fi
 fi
@@ -83,14 +88,14 @@ else
 fi
 
 # --- DYNAMIC KCONFIG VALIDATION REPORT ---
-if [ "$WITH_CUSTOM" = "true" ]; then
+if [ "$ENABLE_NOMOUNT" = "true" ] || [ "$ENABLE_NET_OPTS" = "true" ]; then
     echo "::group::Custom Kconfig Integration Report"
     echo ""
     echo "=============================================="
     echo " CUSTOM KCONFIG VALIDATION REPORT             "
     echo "=============================================="
 
-    FRAGMENT_FILE="../tools/custom.fragment"
+    FRAGMENT_FILE="../tools/custom_combined.fragment"
     
     if [ ! -f "$FRAGMENT_FILE" ]; then
         echo "[-] Notice: tools/custom.fragment not found. Skipping validation."

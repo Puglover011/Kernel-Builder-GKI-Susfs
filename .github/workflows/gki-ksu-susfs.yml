@@ -4,13 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       build_channel:
-        description: 'Build Channel (switch to stable in case of errors/instability)'
+        description: 'Build Channel'
         required: false
         type: choice
         options:
-          - dynamic
           - stable
-          - test
+          - dynamic
 
       build_name:
         description: "Build Name"
@@ -29,6 +28,7 @@ on:
         options:
           - KernelSU-Next
           - SukiSU-Ultra
+          - BakaSU
           - ReSukiSU
           - KernelSU
           - Stock
@@ -37,22 +37,16 @@ on:
         description: "Integrate Root Manager and SUSFS?"
         required: false
         type: boolean
-        default: true
+        default: true      
         
-#      enable_ksu:
-#        description: "Integrate Root Manager only? (uncheck 'Integrate Root Manager and SUSFS')"
-#        required: false
-#        type: boolean
-#        default: false
-        
-      custom_kconfigs:
-        description: "Inject custom Kconfigs (tools/custom.fragment)?"
+      enable_net_opts:
+        description: "Inject Network Optimizations (BBR, CAKE, FastOpen, ECN)"
         required: false
         type: boolean
         default: false
 
-      custom_patches:
-        description: "Apply User Patches and Inject Source Files?"
+      enable_nomount:
+        description: "Inject nomount VFS module"
         required: false
         type: boolean
         default: false
@@ -89,7 +83,7 @@ jobs:
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
         with:
-          tool-cache: true
+          preinstalled-runtimes: true
           android: false
           dotnet: true
           haskell: false
@@ -135,7 +129,10 @@ jobs:
           BASE_VER=$(echo "$TARGET" | cut -d. -f1,2)
           DB_FILE="tools/master_kernel_db.json"
           MANIFEST_BRANCH=""
-
+             
+          # Export to global runner environment immediately
+          echo "BASE_VER=$BASE_VER" >> $GITHUB_ENV
+          
           # --- QUERY UNIFIED JSON DATABASE ---
           if [ -f "$DB_FILE" ]; then
               echo ">>> Querying $DB_FILE for branch match..."
@@ -160,8 +157,8 @@ jobs:
 
               # Map standard GKI kernel bases to their logical LTS branches
               case "$BASE_VER" in
-                  "5.10") ANDROID_VER="android13" ;;
-                  "5.15") ANDROID_VER="android14" ;;
+                  "5.10") ANDROID_VER="android12" ;;
+                  "5.15") ANDROID_VER="android13" ;;
                   "6.1")  ANDROID_VER="android14" ;;
                   "6.6")  ANDROID_VER="android15" ;;
                   "6.12") ANDROID_VER="android16" ;;
@@ -180,39 +177,56 @@ jobs:
 
           # Export to environment for subsequent sync steps
           echo "MANIFEST_BRANCH=${MANIFEST_BRANCH}" >> $GITHUB_ENV
+          echo "ROOT_MANAGER=${{ inputs.root_manager }}" >> $GITHUB_ENV
           echo "MANIFEST_URL=https://android.googlesource.com/kernel/manifest" >> $GITHUB_ENV
 
-
       - name: Configure Build Channels
-        if: inputs.root_manager != 'Stock' && (inputs.enable_ksu_susfs == true || inputs.enable_ksu == true)
+        if: inputs.root_manager != 'Stock' && inputs.enable_ksu_susfs == true
         run: |
           echo "=== Configuring Build Channel: ${{ inputs.build_channel }} ==="
 
+          # 1. Define global upstream quirks based on the selected variant
+          case "${{ inputs.root_manager }}" in
+            "KernelSU-Next")
+              echo "UPSTREAM_REPO=KernelSU-Next/KernelSU-Next" >> $GITHUB_ENV
+              echo "TARGET_BRANCH=dev" >> $GITHUB_ENV
+              echo "WORKFLOW_FILE=build-manager-ci.yml" >> $GITHUB_ENV
+              ;;
+            "SukiSU-Ultra")
+              echo "UPSTREAM_REPO=SukiSU-Ultra/SukiSU-Ultra" >> $GITHUB_ENV
+              echo "TARGET_BRANCH=main" >> $GITHUB_ENV
+              echo "WORKFLOW_FILE=build-manager.yml" >> $GITHUB_ENV
+              ;;
+            "BakaSU")
+              echo "UPSTREAM_REPO=Baka-SU/BakaSU" >> $GITHUB_ENV
+              echo "TARGET_BRANCH=main" >> $GITHUB_ENV
+              echo "WORKFLOW_FILE=build-manager.yml" >> $GITHUB_ENV
+              ;;
+            "ReSukiSU")
+              echo "UPSTREAM_REPO=ReSukiSU/ReSukiSU" >> $GITHUB_ENV
+              echo "TARGET_BRANCH=main" >> $GITHUB_ENV
+              echo "WORKFLOW_FILE=build-manager.yml" >> $GITHUB_ENV
+              ;;
+            "KernelSU"|*)
+              echo "UPSTREAM_REPO=tiann/KernelSU" >> $GITHUB_ENV
+              echo "TARGET_BRANCH=main" >> $GITHUB_ENV
+              echo "WORKFLOW_FILE=build-manager.yml" >> $GITHUB_ENV
+              ;;
+          esac
+
+          # 2. Route the variant to the appropriate build engine
           if [ "${{ inputs.build_channel }}" == "dynamic" ]; then
-
-          # Route KernelSU, KernelSU-Next, ReSukiSU, and SukiSU-Ultra to the dynamic engine
-          if [[ "${{ inputs.root_manager }}" == "KernelSU" || "${{ inputs.root_manager }}" == "KernelSU-Next" || "${{ inputs.root_manager }}" == "ReSukiSU" || "${{ inputs.root_manager }}" == "SukiSU-Ultra" ]]; then
-               echo ">>> Routing ${{ inputs.root_manager }} to Automated Dynamic Transplant..."
-               echo "USE_DYNAMIC_TRANSPLANT=true" >> $GITHUB_ENV
-               echo "SUSFS_REPO_URL=https://gitlab.com/simonpunk/susfs4ksu.git" >> $GITHUB_ENV
-               echo "KSU_VARIANT_REPO_URL=" >> $GITHUB_ENV
-               echo "KSU_VARIANT_REF=stable" >> $GITHUB_ENV
-             else
-               # Any future/unsupported variants will fall back here for now
-               echo ">>> Routing ${{ inputs.root_manager }} to shoey63 Canary fork..."
-               echo "USE_DYNAMIC_TRANSPLANT=false" >> $GITHUB_ENV
-               echo "SUSFS_REPO_URL=https://gitlab.com/simonpunk/susfs4ksu.git" >> $GITHUB_ENV
-               echo "KSU_VARIANT_REPO_URL=https://github.com/shoey63/${{ inputs.root_manager }}.git" >> $GITHUB_ENV
-               echo "KSU_VARIANT_REF=stable" >> $GITHUB_ENV
-             fi
-
+            echo ">>> Routing ${{ inputs.root_manager }} to Automated Dynamic Transplant..."
+            echo "USE_DYNAMIC_TRANSPLANT=true" >> $GITHUB_ENV
+            echo "SUSFS_REPO_URL=https://gitlab.com/simonpunk/susfs4ksu.git" >> $GITHUB_ENV
           else
-            echo ">>> Routing to Safe Fallback Forks (Stable/Test)..."
+            echo ">>> Routing ${{ inputs.root_manager }} to Safe Fallback Fork (Stable branch)..."
             echo "USE_DYNAMIC_TRANSPLANT=false" >> $GITHUB_ENV
             echo "SUSFS_REPO_URL=https://gitlab.com/shoey63/susfs4ksu.git" >> $GITHUB_ENV
             echo "KSU_VARIANT_REPO_URL=https://github.com/shoey63/${{ inputs.root_manager }}.git" >> $GITHUB_ENV
             echo "KSU_VARIANT_REF=${{ inputs.build_channel }}" >> $GITHUB_ENV
           fi
+        shell: bash
 
       - name: Setup repo tool
         run: |
@@ -226,7 +240,23 @@ jobs:
           set -euo pipefail
           rm -rf kernel_workspace && mkdir -p kernel_workspace && cd kernel_workspace
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --depth=1
-          repo sync -c --no-tags --no-clone-bundle --current-branch --fail-fast -j$(nproc)
+          
+          MAX_RETRIES=3
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo ">>> Running repo sync (Attempt $i of $MAX_RETRIES)..."
+            
+            if repo sync -c --no-tags --no-clone-bundle --current-branch -j$(nproc); then
+              echo ">>> Repo sync successful!"
+              break
+            else
+              if [ $i -eq $MAX_RETRIES ]; then
+                echo ">>> Repo sync completely failed after $MAX_RETRIES attempts. Aborting."
+                exit 1
+              fi
+              echo ">>> Sync connection dropped. Waiting 15 seconds before retrying..."
+              sleep 15
+            fi
+          done
 
           # Capture the PURE Google hash AND the official Unix timestamp
           cd common
@@ -234,17 +264,6 @@ jobs:
           echo "OFFICIAL_DATE=$(git log -1 --format=%ct)" >> $GITHUB_ENV
           echo ">>> Captured Hash: $(git rev-parse --short HEAD)"
           echo ">>> Captured Date: $(git log -1 --format=%ct)"
-
-      - name: Integrate Root Manager (${{ inputs.root_manager }})
-        if: inputs.root_manager != 'Stock' && (inputs.enable_ksu_susfs == true || inputs.enable_ksu == true)
-        env:
-          KSU_VARIANT_REPO_URL: ${{ env.KSU_VARIANT_REPO_URL }}
-          KSU_VARIANT_REF: ${{ env.KSU_VARIANT_REF }}
-          USE_DYNAMIC_TRANSPLANT: ${{ env.USE_DYNAMIC_TRANSPLANT }}
-          BUILD_CHANNEL: ${{ inputs.build_channel }}
-          INTEGRATE_SUSFS: ${{ inputs.enable_ksu_susfs }}
-        run: |
-          bash ./scripts/inject_ksu_variant.sh "${{ inputs.root_manager }}"
 
       - name: Calculate Dynamic SuSFS Branch
         if: inputs.root_manager != 'Stock' && inputs.enable_ksu_susfs == true
@@ -265,6 +284,18 @@ jobs:
               echo "SUSFS_BRANCH=gki-android14-6.1-dev" >> $GITHUB_ENV
           fi
 
+      - name: Integrate Root Manager (${{ inputs.root_manager }})
+        if: inputs.root_manager != 'Stock' && inputs.enable_ksu_susfs == true
+        env:
+          KSU_VARIANT_REPO_URL: ${{ env.KSU_VARIANT_REPO_URL }}
+          KSU_VARIANT_REF: ${{ env.KSU_VARIANT_REF }}
+          USE_DYNAMIC_TRANSPLANT: ${{ env.USE_DYNAMIC_TRANSPLANT }}
+          BUILD_CHANNEL: ${{ inputs.build_channel }}
+          INTEGRATE_SUSFS: ${{ inputs.enable_ksu_susfs }}
+          SUSFS_BRANCH: ${{ env.SUSFS_BRANCH }}
+        run: |
+          bash ./scripts/inject_ksu_variant.sh "${{ inputs.root_manager }}"
+
       - name: Integrate SUSFS common-side
         if: inputs.root_manager != 'Stock' && inputs.enable_ksu_susfs == true
         env:
@@ -280,53 +311,86 @@ jobs:
 
       - name: Configure Kconfigs and Fragments
         env:
-          WITH_CUSTOM: ${{ inputs.custom_kconfigs }}
+          ENABLE_NOMOUNT: ${{ inputs.enable_nomount }}
+          ENABLE_NET_OPTS: ${{ inputs.enable_net_opts }}
         run: |
           chmod +x scripts/configure_kconfigs.sh
           ./scripts/configure_kconfigs.sh
 
       - name: Inject User Source Files
-        if: ${{ inputs.custom_patches }}
+        if: inputs.enable_nomount == true || inputs.enable_net_opts == true
+        env:
+          ENABLE_NOMOUNT: ${{ inputs.enable_nomount }}
         run: |
-          SRC_DIR="$(pwd)/tools/user_source"
-
-          # Check if the directory exists and contains files
-          if [ -d "$SRC_DIR" ] && [ "$(ls -A "$SRC_DIR")" ]; then
-            echo ">>> User source files detected. Injecting into common tree..."
-            shopt -s dotglob nullglob
-            cp -r "$SRC_DIR"/* kernel_workspace/common/
-            echo ">>> Source injection complete."
-          else
-            echo ">>> No raw source files found in tools/user_source/."
+          if [ "$ENABLE_NOMOUNT" = "true" ]; then
+            echo ">>> Fetching latest nomount source from master branch..."
+            NOMOUNT_DIR="$(pwd)/tools/user_source/fs/nomount"
+            
+            # Fetch directly from the master branch
+            curl -sSL "https://raw.githubusercontent.com/maxsteeel/nomount/master/kernel/src/nomount.c" -o "$NOMOUNT_DIR/nomount.c"
+            curl -sSL "https://raw.githubusercontent.com/maxsteeel/nomount/master/kernel/src/nomount.h" -o "$NOMOUNT_DIR/nomount.h"
           fi
+
+          echo ">>> Injecting user source files into common tree..."
+          shopt -s dotglob nullglob
+          
+          # Only attempt to copy if there are actually files in the directory
+          SRC_FILES=($(pwd)/tools/user_source/*)
+          if [ ${#SRC_FILES[@]} -gt 0 ]; then
+            cp -r "$(pwd)/tools/user_source/"* kernel_workspace/common/
+            echo "  -> Files injected successfully."
+          else
+            echo "  -> No files found in tools/user_source/ to inject."
+          fi
+          
+          echo ">>> Source injection phase complete."
         shell: bash
 
       - name: Apply User Patches
-        if: ${{ inputs.custom_patches }}
+        if: inputs.enable_net_opts == true
         run: |
           PATCH_DIR="$(pwd)/tools/user_patches"
+          
+          echo ">>> Target Base Version for patches: $BASE_VER"
 
-          # Check if the directory exists and contains any .patch files
-          if [ -d "$PATCH_DIR" ] && ls "$PATCH_DIR"/*.patch >/dev/null 2>&1; then
-            echo ">>> User patches detected in tools/user_patches/. Applying to common tree..."
+          if [ -d "$PATCH_DIR" ]; then
             cd kernel_workspace/common
+            shopt -s nullglob
+            patches=("$PATCH_DIR"/*.patch)
 
-            # Iterate through and apply every patch found
-            for patch_file in "$PATCH_DIR"/*.patch; do
-              echo "  -> Applying $(basename "$patch_file")..."
-              patch -p1 --no-backup-if-mismatch < "$patch_file"
-            done
+            if [ ${#patches[@]} -gt 0 ]; then
+              echo ">>> User patches detected. Filtering by version..."
 
+              for patch_file in "${patches[@]}"; do
+                filename=$(basename "$patch_file")
+                
+                # Condition 1: Exact BASE_VER match (e.g., 6.1-0001-fix.patch)
+                if [[ "$filename" == "${BASE_VER}-"* ]]; then
+                  echo "  -> [MATCH] Applying version-specific patch: $filename..."
+                  patch -p1 --no-backup-if-mismatch < "$patch_file" || { echo "[-] Patch failed: $filename"; exit 1; }
+                  
+                # Condition 2: Matches any other kernel version prefix (e.g., 6.6-0005.patch)
+                elif [[ "$filename" =~ ^[0-9]+\.[0-9]+- ]]; then
+                  continue # Silently skip non-matching versions
+                  
+                # Condition 3: Universal patch (e.g., 0007-security-fix.patch)
+                else
+                  echo "  -> [GENERIC] Applying generic patch: $filename..."
+                  patch -p1 --no-backup-if-mismatch < "$patch_file" || { echo "[-] Patch failed: $filename"; exit 1; }
+                fi
+              done
+              echo ">>> Patching routine complete."
+            else
+              echo ">>> No .patch files found in tools/user_patches/."
+            fi
             cd ../..
-            echo ">>> User patching complete."
-          else
-            echo ">>> No user patches found in tools/user_patches/. Proceeding with stock source."
           fi
         shell: bash
 
       - name: Build common kernel Image
         env:
-          WITH_CUSTOM: ${{ inputs.custom_kconfigs }}
+          ENABLE_NOMOUNT: ${{ inputs.enable_nomount }}
+          ENABLE_NET_OPTS: ${{ inputs.enable_net_opts }}
           ROOT_MANAGER: ${{ inputs.root_manager }}
         run: |
           # Injecting the REAL Google identity into the script session
@@ -408,68 +472,9 @@ jobs:
 
           echo ">>> Final Artifact Directory:"
           ls -lah out/final/
-
-      # ---------------------------------------------------------
-      # NEW: Compile custom Manager from source ONLY on 'test' channel
-      # ---------------------------------------------------------
-      - name: Setup Java for Custom Manager Build
-        if: (inputs.enable_ksu_susfs == true || inputs.enable_ksu == true) && inputs.build_channel == 'test' && inputs.root_manager == 'KernelSU-Next'
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '21'
-
-      - name: Setup Rust & Cargo-NDK
-        if: (inputs.enable_ksu_susfs == true || inputs.enable_ksu == true) && inputs.build_channel == 'test' && inputs.root_manager == 'KernelSU-Next'
-        run: |
-          echo ">>> Setting up Rust targets for Android..."
-          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
-          echo ">>> Installing cargo-ndk..."
-          cargo install cargo-ndk
-
-      - name: Build Custom Manager APK (Test Channel)
-        if: (inputs.enable_ksu_susfs == true || inputs.enable_ksu == true) && inputs.build_channel == 'test' && inputs.root_manager == 'KernelSU-Next'
-        env:
-          KSU_VARIANT_REPO_URL: ${{ env.KSU_VARIANT_REPO_URL }}
-          KSU_VARIANT_REF: ${{ env.KSU_VARIANT_REF }}
-        run: |
-          echo ">>> Compiling custom manager from $KSU_VARIANT_REPO_URL branch $KSU_VARIANT_REF..."
-
-          git clone --recursive -b "$KSU_VARIANT_REF" "$KSU_VARIANT_REPO_URL" custom_manager_src
-          cd custom_manager_src
-          git fetch --tags
-
-          echo ">>> Compiling ksud native binaries..."
-          cd userspace/ksud
-          # Use cargo-ndk to automatically handle Android NDK linkers
-          cargo ndk -t arm64-v8a -t x86_64 build --release
-
-          echo ">>> Injecting ksud into Manager jniLibs..."
-          mkdir -p ../../manager/app/src/main/jniLibs/arm64-v8a
-          mkdir -p ../../manager/app/src/main/jniLibs/x86_64
-
-          # The magic trick: copy the executable and disguise it as a .so library
-          cp target/aarch64-linux-android/release/ksud ../../manager/app/src/main/jniLibs/arm64-v8a/libksud.so
-          cp target/x86_64-linux-android/release/ksud ../../manager/app/src/main/jniLibs/x86_64/libksud.so
-                    cd ../../manager
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-
-          chmod +x gradlew
-
-          # Tell Gradle to build the debug variant using the repo's static keystore
-          ./gradlew assembleDebug
-
-          echo ">>> Moving compiled APK to artifact directory..."
-          mkdir -p ../../manager_apk
-
-          # Point the copy command to the 'debug' output folder instead of 'release'
-          cp app/build/outputs/apk/debug/*.apk ../../manager_apk/ 2>/dev/null || cp app/build/outputs/apk/**/*.apk ../../manager_apk/
-
-      # ---------------------------------------------------------
-      # MODIFIED: Fetch upstream APK on 'dynamic' or 'stable', bypass on 'test'
-      # ---------------------------------------------------------
+          
       - name: Fetch Matching Manager APK
-        if: inputs.root_manager != 'Stock' && (inputs.enable_ksu_susfs == true || inputs.enable_ksu == true) && (inputs.build_channel != 'test' || inputs.root_manager != 'KernelSU-Next')
+        if: inputs.root_manager != 'Stock' && inputs.enable_ksu_susfs == true
         id: fetch_manager
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -485,9 +490,47 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
           path: out/final/
           if-no-files-found: error
+          
+      - name: Fetch NoMount KernelSU Module
+        if: inputs.enable_nomount == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo ">>> Fetching latest stable NoMount release module..."
+          mkdir -p nomount_extracted
+          
+          # 1. Query GitHub API for the latest release
+          RELEASE_JSON=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/maxsteeel/nomount/releases/latest")
+          
+          # 2. Extract the browser_download_url for the zip asset
+          DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
+          
+          if [ -n "$DOWNLOAD_URL" ] && [ "$DOWNLOAD_URL" != "null" ]; then
+            echo "  -> Found latest release artifact. Downloading from: $DOWNLOAD_URL"
+            curl -sL -o temp_module.zip "$DOWNLOAD_URL"
+            
+            echo "  -> Extracting module..."
+            unzip -q temp_module.zip -d nomount_extracted/
+            rm temp_module.zip
+            echo "  -> Success! Extracted contents:"
+            ls -la nomount_extracted/
+          else
+            echo "[-] Failed to find a valid zip artifact in the latest release."
+            exit 1
+          fi
+        shell: bash
+
+      - name: Upload NoMount Module
+        if: inputs.enable_nomount == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoMount-KSU-Module
+          path: nomount_extracted/
+          if-no-files-found: warn
 
       - name: Upload Manager APK
-        if: inputs.root_manager != 'Stock' && (inputs.enable_ksu_susfs == true || inputs.enable_ksu == true)
+        if: inputs.root_manager != 'Stock' && inputs.enable_ksu_susfs == true
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.root_manager }}-Manager

@@ -1,3 +1,4 @@
+# scripts/validate_ota.py
 import sys
 import os
 from remotezip import RemoteZip

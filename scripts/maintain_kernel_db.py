@@ -1,3 +1,4 @@
+# scripts/maintain_kernel_db.py
 import json
 import re
 import urllib.request
